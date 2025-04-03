@@ -100,8 +100,8 @@ def fetch_movie_poster(movie_title, api_key):
         if response.status_code == 200:
             data = response.json()
             
-            # Debug: Print response data to console
-            print(f"API Response for '{search_title}': {data}")
+            # # Debug: Print response data to console
+            # print(f"API Response for '{search_title}': {data}")
             
             if data.get('Response') == 'True' and 'Poster' in data and data['Poster'] != 'N/A':
                 poster_url = data['Poster']

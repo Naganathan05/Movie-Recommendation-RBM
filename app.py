@@ -6,12 +6,15 @@ import os
 import matplotlib.pyplot as plt
 import sys
 import warnings
+import torch.nn as nn
+import torch.optim as optim
 
 # Add directory to path so we can import from our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 # Import modules
 from models.rbm import RBM
+from models.autoencoder import Autoencoder  # Add this import
 from utils.data_processor import load_and_preprocess_data, download_and_extract_dataset, search_movies, fetch_movie_poster
 from utils.recommender import get_recommendations_for_new_user
 
@@ -39,21 +42,160 @@ def load_data():
     # Load and preprocess data
     return load_and_preprocess_data()
 
-def get_model(nb_movies, nb_hidden, learning_rate=0.005):
+def get_model(model_type, nb_movies, nb_hidden, learning_rate=0.005):
     """Load existing model or return None if not available"""
-    model_path = "rbm_model.pt"
+    if model_type == "rbm":
+        model_path = "rbm_model.pt"
+        
+        if os.path.exists(model_path):
+            try:
+                model = RBM(nb_movies, nb_hidden, learning_rate)
+                model.load_state_dict(torch.load(model_path))
+                model.eval()
+                return model
+            except Exception as e:
+                st.error(f"Error loading RBM model: {e}")
     
-    if os.path.exists(model_path):
-        try:
-            model = RBM(nb_movies, nb_hidden, learning_rate)
-            model.load_state_dict(torch.load(model_path))
-            model.eval()
-            return model
-        except Exception as e:
-            st.error(f"Error loading model: {e}")
+    elif model_type == "autoencoder":
+        model_path = "autoencoder_model.pt"
+        
+        if os.path.exists(model_path):
+            try:
+                # We need to use the exact same hidden dimensions as when training
+                # For Autoencoder, we need to store the hidden_dim in the model file
+                # or use a fixed hidden_dim
+                
+                # Try to load saved model parameters to determine dimensions
+                saved_state = torch.load(model_path)
+                # Extract dimensions from the first layer weight
+                if "encoder.0.weight" in saved_state:
+                    # The second dimension is always nb_movies
+                    actual_hidden_dim = saved_state["encoder.0.weight"].shape[0] // 2
+                    
+                    # Create model with the same dimensions as the saved model
+                    model = Autoencoder(nb_movies, actual_hidden_dim)
+                    model.load_state_dict(saved_state)
+                    model.eval()
+                    return model
+                else:
+                    raise ValueError("Saved model has unexpected format")
+                    
+            except Exception as e:
+                st.error(f"Error loading Autoencoder model: {e}")
+                # You might want to delete the corrupted model file
+                if st.button("Delete corrupted model and retrain?"):
+                    try:
+                        os.remove(model_path)
+                        st.success("Old model removed. Please retrain.")
+                    except:
+                        st.error("Failed to remove old model file.")
     
     # If model doesn't exist or couldn't be loaded
     return None
+
+def save_model(model, filepath, model_type="rbm"):
+    """Save the trained model to a file"""
+    try:
+        torch.save(model.state_dict(), filepath)
+        st.success(f"{model_type.upper()} model saved successfully to {filepath}")
+    except Exception as e:
+        st.error(f"Error saving {model_type} model: {e}")
+
+def display_recommendations(recommendations, create_columns=True):
+    """Display recommendations in a grid with posters
+    
+    Args:
+        recommendations: DataFrame with movie recommendations
+        create_columns: If False, doesn't create columns (for nested contexts)
+    """
+    num_rec_cols = 3
+    rec_rows = [(i, row) for i, (_, row) in enumerate(recommendations.iterrows(), 1)]
+    rec_rows = [rec_rows[i:i+num_rec_cols] for i in range(0, len(rec_rows), num_rec_cols)]
+    
+    for row in rec_rows:
+        if create_columns:
+            cols = st.columns(num_rec_cols)
+            for j, (i, rec) in enumerate(row):
+                if j < len(cols):
+                    with cols[j]:
+                        poster_url = fetch_movie_poster(rec['title'], st.session_state.api_key)
+                        st.image(poster_url, width=120)
+                        st.write(f"**{i}. {rec['title'][:25]}**" + 
+                                 ("..." if len(rec['title']) > 25 else ""))
+                        st.write(f"⭐ {rec['predicted_rating']:.1f}/5")
+        else:
+            # Display without creating more columns (for nested contexts)
+            for j, (i, rec) in enumerate(row):
+                poster_url = fetch_movie_poster(rec['title'], st.session_state.api_key)
+                st.image(poster_url, width=80)  # Smaller image
+                st.write(f"**{i}. {rec['title'][:25]}**" + 
+                         ("..." if len(rec['title']) > 25 else ""))
+                st.write(f"⭐ {rec['predicted_rating']:.1f}/5")
+                # Add separator between recommendations except last one
+                if j < len(row) - 1:
+                    st.markdown("---")
+
+def train_autoencoder(train_data, nb_epoch, batch_size, hidden_dim, learning_rate):
+    """Train the Autoencoder model with progress indicators"""
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    # Convert data to torch tensor
+    train_tensor = torch.FloatTensor(train_data)
+    
+    # Create model, loss function, and optimizer
+    model = Autoencoder(train_data.shape[1], hidden_dim)
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
+    
+    # Create data loader
+    train_dataset = torch.utils.data.TensorDataset(train_tensor, train_tensor)
+    train_loader = torch.utils.data.DataLoader(
+        dataset=train_dataset, batch_size=batch_size, shuffle=True
+    )
+    
+    # Training loop
+    training_loss_history = []
+    
+    for epoch in range(1, nb_epoch + 1):
+        model.train()  # Set to training mode
+        running_loss = 0.0
+        
+        for batch_idx, (data, target) in enumerate(train_loader):
+            # Zero the gradients
+            optimizer.zero_grad()
+            
+            # Forward pass - ignore missing ratings (those with -1)
+            mask = data >= 0
+            output = model(data)
+            
+            # Set output for missing ratings to -1 (to match input)
+            output = output * mask.float()
+            
+            # Calculate loss only on non-missing ratings
+            loss = criterion(output[mask], target[mask])
+            
+            # Backward pass and optimize
+            loss.backward()
+            optimizer.step()
+            
+            # Track loss
+            running_loss += loss.item()
+        
+        # Calculate average loss for this epoch
+        epoch_loss = running_loss / len(train_loader)
+        training_loss_history.append(epoch_loss)
+        
+        # Update progress
+        progress = epoch / nb_epoch
+        progress_bar.progress(progress)
+        status_text.text(f'Epoch: {epoch}/{nb_epoch} - Loss: {epoch_loss:.4f}')
+    
+    status_text.text('Training complete!')
+    
+    # Save the trained model
+    save_model(model, "autoencoder_model.pt", model_type="autoencoder")
+    return training_loss_history
 
 def train_rbm(rbm, train_data, nb_epoch=10, batch_size=64, k_steps=5):
     """Train the RBM model with progress indicators"""
@@ -89,14 +231,6 @@ def train_rbm(rbm, train_data, nb_epoch=10, batch_size=64, k_steps=5):
     status_text.text('Training complete!')
     return training_loss_history
 
-def save_model(model, filepath='rbm_model.pt'):
-    """Save the trained RBM model to a file"""
-    try:
-        torch.save(model.state_dict(), filepath)
-        st.success(f"Model saved successfully to {filepath}")
-    except Exception as e:
-        st.error(f"Error saving model: {e}")
-
 def plot_training_loss(loss_history, nb_epoch):
     """Plot the training loss over epochs"""
     fig, ax = plt.subplots(figsize=(10, 6))
@@ -113,6 +247,7 @@ def main():
     
     # Hardcoded API key - no user input needed
     api_key = "4e634d4f"  # Hardcoded OMDB API key
+    st.session_state.api_key = api_key
     
     # Load data - use st.session_state to avoid reloading
     if 'data_loaded' not in st.session_state:
@@ -143,10 +278,11 @@ def main():
     with tab1:
         st.header("Get Movie Recommendations")
         
-        # Load the model - avoid using cache for pytorch models
-        rbm = get_model(nb_movies, nb_hidden, learning_rate)
+        # Load the models - avoid using cache for pytorch models
+        rbm = get_model("rbm", nb_movies, nb_hidden, learning_rate)
+        autoencoder = get_model("autoencoder", nb_movies, nb_hidden, learning_rate)
         
-        if rbm is None:
+        if rbm is None and autoencoder is None:
             st.info("Please go to the 'Train Model' tab to train a model first.")
         else:
             # Session state for storing user ratings
@@ -156,6 +292,7 @@ def main():
             # Use 3 columns with appropriate widths
             col1, col2, col3 = st.columns([2, 1, 3])
             
+            # First column - Movie search and rating
             with col1:
                 st.subheader("Find Movies")
                 query = st.text_input("Search for movies:")
@@ -191,6 +328,7 @@ def main():
                     if len(matching_movies) > max_results:
                         st.info(f"Showing top {max_results} results. Refine your search for more specific movies.")
             
+            # Second column - User ratings
             with col2:
                 st.subheader("Your Ratings")
                 if st.session_state.user_ratings:
@@ -209,36 +347,71 @@ def main():
                 else:
                     st.info("No movies rated yet")
             
+            # Third column - Recommendations with model selection
             with col3:
                 st.subheader("Recommendations")
                 if st.session_state.user_ratings:
                     num_recommendations = st.slider("Number of recommendations:", 5, 20, 10)
                     
+                    # Add model selection options
+                    model_type = st.radio(
+                        "Select model for recommendations:",
+                        ["RBM", "Autoencoder", "Compare Both"],
+                        horizontal=True
+                    )
+                    
+                    # Get recommendations button
                     if st.button("Get Recommendations", use_container_width=True):
                         with st.spinner('Generating recommendations...'):
                             try:
-                                recommendations = get_recommendations_for_new_user(
-                                    rbm, st.session_state.user_ratings, user_item_matrix, 
-                                    movies, num_recommendations
-                                )
+                                if model_type == "RBM" and rbm is not None:
+                                    recommendations = get_recommendations_for_new_user(
+                                        rbm, st.session_state.user_ratings, user_item_matrix, 
+                                        movies, num_recommendations, model_type="rbm"
+                                    )
+                                    st.subheader("Top Picks Using RBM:")
+                                    display_recommendations(recommendations)
+                                    
+                                elif model_type == "Autoencoder" and autoencoder is not None:
+                                    recommendations = get_recommendations_for_new_user(
+                                        autoencoder, st.session_state.user_ratings, user_item_matrix, 
+                                        movies, num_recommendations, model_type="autoencoder"
+                                    )
+                                    st.subheader("Top Picks Using Autoencoder:")
+                                    display_recommendations(recommendations)
+                                    
+                                elif model_type == "Compare Both":
+                                    col_rbm, col_ae = st.columns(2)
+                                    
+                                    with col_rbm:
+                                        if rbm is not None:
+                                            rbm_recs = get_recommendations_for_new_user(
+                                                rbm, st.session_state.user_ratings, user_item_matrix, 
+                                                movies, num_recommendations, model_type="rbm"
+                                            )
+                                            st.subheader("RBM Recommendations:")
+                                            # Pass create_columns=False to avoid nested columns
+                                            display_recommendations(rbm_recs, create_columns=False)
+                                        else:
+                                            st.warning("RBM model not trained yet")
+                                    
+                                    with col_ae:
+                                        if autoencoder is not None:
+                                            ae_recs = get_recommendations_for_new_user(
+                                                autoencoder, st.session_state.user_ratings, user_item_matrix, 
+                                                movies, num_recommendations, model_type="autoencoder"
+                                            )
+                                            st.subheader("Autoencoder Recommendations:")
+                                            # Pass create_columns=False to avoid nested columns
+                                            display_recommendations(ae_recs, create_columns=False)
+                                        else:
+                                            st.warning("Autoencoder model not trained yet")
+                                else:
+                                    if model_type == "RBM":
+                                        st.warning("Please train the RBM model first")
+                                    else:
+                                        st.warning("Please train the Autoencoder model first")
                                 
-                                st.subheader("Top Picks For You:")
-                                
-                                # Display recommendations in a grid with posters - 3 columns
-                                num_rec_cols = 3
-                                rec_rows = [(i, row) for i, (_, row) in enumerate(recommendations.iterrows(), 1)]
-                                rec_rows = [rec_rows[i:i+num_rec_cols] for i in range(0, len(rec_rows), num_rec_cols)]
-                                
-                                for row in rec_rows:
-                                    cols = st.columns(num_rec_cols)
-                                    for j, (i, rec) in enumerate(row):
-                                        if j < len(cols):
-                                            with cols[j]:
-                                                poster_url = fetch_movie_poster(rec['title'], api_key)
-                                                st.image(poster_url, width=120)
-                                                st.write(f"**{i}. {rec['title'][:25]}**" + 
-                                                         ("..." if len(rec['title']) > 25 else ""))
-                                                st.write(f"⭐ {rec['predicted_rating']:.1f}/5")
                             except Exception as e:
                                 st.error(f"Error generating recommendations: {e}")
                 else:
@@ -256,46 +429,85 @@ def main():
     with tab2:
         st.header("Train Model")
         
-        # Model parameters
-        st.subheader("Model Parameters")
-        col1, col2 = st.columns(2)
-        with col1:
-            nb_epoch = st.slider("Number of epochs:", 1, 20, 10)
-            batch_size = st.slider("Batch size:", 16, 128, 64)
-        with col2:
-            k_steps = st.slider("CD steps:", 1, 10, 5)
-            learning_rate = st.slider("Learning rate:", 0.001, 0.01, 0.005, format="%.4f")
+        # Model selection
+        model_to_train = st.radio(
+            "Select model to train:",
+            ["Restricted Boltzmann Machine (RBM)", "Autoencoder"],
+            horizontal=True
+        )
         
-        if st.button("Train New Model"):
-            with st.spinner("Training model... This may take a while."):
-                try:
-                    rbm = RBM(nb_movies, nb_hidden, learning_rate)
-                    training_loss_history = train_rbm(rbm, train_data, nb_epoch, batch_size, k_steps)
-                    save_model(rbm, "rbm_model.pt")
-                    
-                    st.subheader("Training Results")
-                    plot_training_loss(training_loss_history, nb_epoch)
-                except Exception as e:
-                    st.error(f"Error during model training: {e}")
+        if model_to_train == "Restricted Boltzmann Machine (RBM)":
+            # Model parameters for RBM
+            st.subheader("RBM Parameters")
+            col1, col2 = st.columns(2)
+            with col1:
+                nb_epoch = st.slider("Number of epochs:", 1, 20, 10)
+                batch_size = st.slider("Batch size:", 16, 128, 64)
+            with col2:
+                k_steps = st.slider("CD steps:", 1, 10, 5)
+                learning_rate = st.slider("Learning rate:", 0.001, 0.01, 0.005, format="%.4f")
+            
+            if st.button("Train RBM Model"):
+                with st.spinner("Training RBM model... This may take a while."):
+                    try:
+                        rbm = RBM(nb_movies, nb_hidden, learning_rate)
+                        training_loss_history = train_rbm(rbm, train_data, nb_epoch, batch_size, k_steps)
+                        save_model(rbm, "rbm_model.pt", model_type="rbm")
+                        
+                        st.subheader("Training Results")
+                        plot_training_loss(training_loss_history, nb_epoch)
+                    except Exception as e:
+                        st.error(f"Error during RBM model training: {e}")
+        
+        else:
+            # Model parameters for Autoencoder
+            st.subheader("Autoencoder Parameters")
+            col1, col2 = st.columns(2)
+            with col1:
+                ae_epochs = st.slider("Number of epochs:", 1, 50, 20)
+                ae_batch_size = st.slider("Batch size:", 16, 256, 128)
+            with col2:
+                ae_hidden_dim = st.slider("Hidden dimension:", 8, 512, 128)
+                ae_lr = st.slider("Learning rate:", 0.0001, 0.01, 0.001, format="%.5f")
+                
+            if st.button("Train Autoencoder Model"):
+                with st.spinner("Training Autoencoder model... This may take a while."):
+                    try:
+                        training_loss_history = train_autoencoder(
+                            train_data, ae_epochs, ae_batch_size, ae_hidden_dim, ae_lr
+                        )
+                        st.subheader("Training Results")
+                        plot_training_loss(training_loss_history, ae_epochs)
+                    except Exception as e:
+                        st.error(f"Error during Autoencoder model training: {e}")
     
     with tab3:
         st.header("About This App")
         st.write("""
-        This movie recommendation system uses a Restricted Boltzmann Machine (RBM) to learn user
-        preferences and recommend movies based on your ratings.
+        This movie recommendation system compares two different neural network approaches:
+        
+        1. **Restricted Boltzmann Machine (RBM)**:
+        - A generative stochastic neural network that can learn a probability distribution
+        - Uses unsupervised learning to discover patterns in the data
+        - Makes recommendations based on learned probability distributions
+        
+        2. **Autoencoder**:
+        - An unsupervised neural network that learns efficient encodings of input data
+        - Learns to compress and reconstruct user rating patterns
+        - Makes recommendations based on reconstructed ratings
         
         ## How it works:
         1. The system is trained on the MovieLens 1M dataset containing 1 million ratings from 6,000 users on 4,000 movies.
-        2. The RBM learns patterns in user ratings to understand preferences.
+        2. Both models learn patterns in user ratings to understand preferences.
         3. When you rate movies, the system predicts how you would rate other movies you haven't seen.
         4. Movies with the highest predicted ratings are recommended to you.
         
         ## Technologies used:
-        - PyTorch for the RBM implementation
+        - PyTorch for the neural network implementations
         - Streamlit for the user interface
         - Python for data processing
         
-        This project demonstrates the application of unsupervised learning in recommendation systems.
+        This project demonstrates the application of different unsupervised learning techniques in recommendation systems.
         """)
 
 if __name__ == "__main__":

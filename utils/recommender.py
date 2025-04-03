@@ -3,8 +3,17 @@ import numpy as np
 import pandas as pd
 import torch
 
-def recommend_movies(rbm, user_ratings, user_item_matrix, movies_df, num_recommendations=10):
-    """Generate movie recommendations for a specific user based on their ratings."""
+def recommend_movies(model, user_ratings, user_item_matrix, movies_df, num_recommendations=10, model_type="rbm"):
+    """Generate movie recommendations based on user ratings.
+    
+    Args:
+        model: Trained model (either RBM or Autoencoder)
+        user_ratings: Dictionary mapping movie_id to rating
+        user_item_matrix: Full user-item matrix from dataset
+        movies_df: DataFrame containing movie information
+        num_recommendations: Number of movies to recommend
+        model_type: Either "rbm" or "autoencoder"
+    """
     # Create a user vector with -1 for all movies
     new_user_vector = np.full(user_item_matrix.shape[1], -1.0)
     
@@ -19,8 +28,20 @@ def recommend_movies(rbm, user_ratings, user_item_matrix, movies_df, num_recomme
     # Reshape and convert to tensor
     new_user_tensor = torch.FloatTensor(new_user_vector.reshape(1, -1))
     
-    # Get the reconstructed ratings
-    reconstructed_ratings = rbm(new_user_tensor).detach().numpy().flatten()
+    # Get the reconstructed ratings based on model type
+    if model_type.lower() == "rbm":
+        # RBM uses forward pass directly
+        reconstructed_ratings = model(new_user_tensor).detach().numpy().flatten()
+    else:
+        # Autoencoder - use either predict method if available, or forward pass
+        try:
+            # Try using predict method first (if available)
+            reconstructed_ratings = model.predict(new_user_tensor).detach().numpy().flatten()
+        except AttributeError:
+            # Fall back to direct call
+            model.eval()  # Set to evaluation mode
+            with torch.no_grad():
+                reconstructed_ratings = model(new_user_tensor).numpy().flatten()
     
     # Get indices of movies the user hasn't rated yet
     unrated_indices = np.where(new_user_vector < 0)[0]
@@ -37,5 +58,5 @@ def recommend_movies(rbm, user_ratings, user_item_matrix, movies_df, num_recomme
     
     return recommended_movies.sort_values('predicted_rating', ascending=False)
 
-# Add the missing function for compatibility with the app
+# Keep backward compatibility
 get_recommendations_for_new_user = recommend_movies
