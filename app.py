@@ -153,57 +153,68 @@ def main():
             if 'user_ratings' not in st.session_state:
                 st.session_state.user_ratings = {}
             
-            col1, col2 = st.columns([1, 2])
+            # Use 3 columns with appropriate widths
+            col1, col2, col3 = st.columns([2, 1, 3])
             
             with col1:
-                st.subheader("Rate Movies")
+                st.subheader("Find Movies")
                 query = st.text_input("Search for movies:")
                 matching_movies = search_movies(movies, query)
                 
                 if not matching_movies.empty:
-                    # Display movies with posters in a grid layout
-                    num_cols = 2  # Number of columns in the grid
-                    movie_rows = [matching_movies['title'].tolist()[i:i+num_cols] 
-                                 for i in range(0, len(matching_movies), num_cols)]
+                    # Display movies with posters in a grid layout with 3 movies per row
+                    num_cols = 3  # Number of columns in the grid
+                    # Limit number of displayed search results
+                    max_results = 12
+                    limited_movies = matching_movies.head(max_results)
+                    
+                    movie_rows = [limited_movies['title'].tolist()[i:i+num_cols] 
+                                 for i in range(0, len(limited_movies), num_cols)]
                     
                     for row in movie_rows:
-                        cols = st.columns(num_cols)
+                        movie_cols = st.columns(num_cols)
                         for i, movie_title in enumerate(row):
-                            if i < len(cols):  # Make sure we don't exceed the number of columns
-                                movie_id = matching_movies[matching_movies['title'] == movie_title]['movie_id'].values[0]
+                            if i < len(movie_cols):
+                                movie_id = limited_movies[limited_movies['title'] == movie_title]['movie_id'].values[0]
                                 
-                                # Display movie with poster
-                                with cols[i]:
-                                    # Always fetch poster using hardcoded API key
+                                with movie_cols[i]:
                                     poster_url = fetch_movie_poster(movie_title, api_key)
-                                    st.image(poster_url, width=150)
-                                    st.write(f"**{movie_title}**")
-                                    rating = st.slider(f"Rate {i+1}:", 1, 5, 3, key=f"rate_{movie_id}")
-                                    if st.button("Rate", key=f"btn_{movie_id}"):
+                                    st.image(poster_url, width=100)  # Smaller poster
+                                    st.write(f"**{movie_title[:25]}**" + ("..." if len(movie_title) > 25 else ""))
+                                    rating = st.slider("Rate:", 1, 5, 3, key=f"rate_{movie_id}", 
+                                                      label_visibility="collapsed")
+                                    if st.button("Rate", key=f"btn_{movie_id}", use_container_width=True):
                                         st.session_state.user_ratings[movie_id] = rating
-                                        st.success(f"Added: {movie_title} - {rating}/5")
-                                        st.rerun()  # Fixed: using st.rerun() instead of experimental_rerun
-                
-                # Show current ratings
-                if st.session_state.user_ratings:
-                    st.subheader("Your Ratings:")
-                    for movie_id, rating in st.session_state.user_ratings.items():
-                        try:
-                            movie_title = movies[movies['movie_id'] == movie_id]['title'].values[0]
-                            st.write(f"- {movie_title}: {rating}/5")
-                        except IndexError:
-                            st.write(f"- Movie ID {movie_id}: {rating}/5")
+                                        st.success(f"Rated: {rating}/5", icon="✅")
+                                        st.rerun()
                     
-                    if st.button("Clear Ratings"):
-                        st.session_state.user_ratings = {}
-                        st.rerun()  # Fixed: using st.rerun() instead of experimental_rerun
-                
+                    if len(matching_movies) > max_results:
+                        st.info(f"Showing top {max_results} results. Refine your search for more specific movies.")
+            
             with col2:
+                st.subheader("Your Ratings")
+                if st.session_state.user_ratings:
+                    # Create a scrollable area for ratings
+                    with st.container():
+                        for movie_id, rating in st.session_state.user_ratings.items():
+                            try:
+                                movie_title = movies[movies['movie_id'] == movie_id]['title'].values[0]
+                                st.write(f"**{movie_title[:20]}{'...' if len(movie_title) > 20 else ''}**: {'⭐' * rating}")
+                            except IndexError:
+                                st.write(f"Movie ID {movie_id}: {rating}/5")
+                    
+                    if st.button("Clear Ratings", use_container_width=True):
+                        st.session_state.user_ratings = {}
+                        st.rerun()
+                else:
+                    st.info("No movies rated yet")
+            
+            with col3:
                 st.subheader("Recommendations")
                 if st.session_state.user_ratings:
                     num_recommendations = st.slider("Number of recommendations:", 5, 20, 10)
                     
-                    if st.button("Get Recommendations"):
+                    if st.button("Get Recommendations", use_container_width=True):
                         with st.spinner('Generating recommendations...'):
                             try:
                                 recommendations = get_recommendations_for_new_user(
@@ -211,28 +222,36 @@ def main():
                                     movies, num_recommendations
                                 )
                                 
-                                st.subheader("Top Recommendations For You:")
+                                st.subheader("Top Picks For You:")
                                 
-                                # Display recommendations in a grid with posters
-                                num_rec_cols = 3  # Number of columns for recommendations
+                                # Display recommendations in a grid with posters - 3 columns
+                                num_rec_cols = 3
                                 rec_rows = [(i, row) for i, (_, row) in enumerate(recommendations.iterrows(), 1)]
                                 rec_rows = [rec_rows[i:i+num_rec_cols] for i in range(0, len(rec_rows), num_rec_cols)]
                                 
                                 for row in rec_rows:
                                     cols = st.columns(num_rec_cols)
                                     for j, (i, rec) in enumerate(row):
-                                        if j < len(cols):  # Make sure we don't exceed the number of columns
+                                        if j < len(cols):
                                             with cols[j]:
-                                                # Always fetch poster using hardcoded API key
                                                 poster_url = fetch_movie_poster(rec['title'], api_key)
-                                                st.image(poster_url, width=150)
-                                                st.write(f"**{i}. {rec['title']}**")
-                                                st.write(f"Genres: {rec['genres']}")
-                                                st.write(f"Predicted Rating: ⭐ {rec['predicted_rating']:.2f}/5")
+                                                st.image(poster_url, width=120)
+                                                st.write(f"**{i}. {rec['title'][:25]}**" + 
+                                                         ("..." if len(rec['title']) > 25 else ""))
+                                                st.write(f"⭐ {rec['predicted_rating']:.1f}/5")
                             except Exception as e:
                                 st.error(f"Error generating recommendations: {e}")
                 else:
                     st.info("Please rate some movies to get recommendations.")
+                    
+                    # Show example empty recommendation cards for visual layout
+                    st.write("Sample recommendations will appear here:")
+                    sample_cols = st.columns(3)
+                    for i, col in enumerate(sample_cols):
+                        with col:
+                            st.image("assets/placeholder.jpg", width=120)
+                            st.write("**Example Movie**")
+                            st.write("⭐ ?/5")
     
     with tab2:
         st.header("Train Model")

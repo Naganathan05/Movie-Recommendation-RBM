@@ -108,10 +108,10 @@ def fetch_movie_poster(movie_title, api_key):
             else:
                 # If no poster found, provide a placeholder with the movie title
                 encoded_placeholder = urllib.parse.quote(f"No Poster: {search_title}")
-                poster_url = f"https://via.placeholder.com/150x225?text={encoded_placeholder}"
+                poster_url = "assets/placeholder.jpg"
         else:
             print(f"API Error: Status code {response.status_code} for movie '{search_title}'")
-            poster_url = "https://via.placeholder.com/150x225?text=API+Error"
+            poster_url = "assets/placeholder.jpg"
         
         # Store in cache
         st.session_state.poster_cache[movie_title] = poster_url
