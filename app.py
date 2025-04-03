@@ -8,6 +8,7 @@ import sys
 import warnings
 import torch.nn as nn
 import torch.optim as optim
+import time  # Add time import
 
 # Add directory to path so we can import from our modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -139,6 +140,7 @@ def train_autoencoder(train_data, nb_epoch, batch_size, hidden_dim, learning_rat
     """Train the Autoencoder model with progress indicators"""
     progress_bar = st.progress(0)
     status_text = st.empty()
+    start_time = time.time()
     
     # Convert data to torch tensor
     train_tensor = torch.FloatTensor(train_data)
@@ -191,6 +193,13 @@ def train_autoencoder(train_data, nb_epoch, batch_size, hidden_dim, learning_rat
         progress_bar.progress(progress)
         status_text.text(f'Epoch: {epoch}/{nb_epoch} - Loss: {epoch_loss:.4f}')
     
+    # Store metrics in session_state
+    st.session_state.autoencoder_metrics = {
+        'loss_history': training_loss_history,
+        'epochs': nb_epoch
+    }
+    st.session_state.autoencoder_train_time = time.time() - start_time
+    
     status_text.text('Training complete!')
     
     # Save the trained model
@@ -201,6 +210,7 @@ def train_rbm(rbm, train_data, nb_epoch=10, batch_size=64, k_steps=5):
     """Train the RBM model with progress indicators"""
     progress_bar = st.progress(0)
     status_text = st.empty()
+    start_time = time.time()  # Add time import at the top
     
     nb_users = train_data.shape[0]
     training_loss_history = []
@@ -228,6 +238,13 @@ def train_rbm(rbm, train_data, nb_epoch=10, batch_size=64, k_steps=5):
         progress_bar.progress(progress)
         status_text.text(f'Epoch: {epoch}/{nb_epoch} - Loss: {epoch_loss:.4f}')
 
+    # Store metrics in session_state
+    st.session_state.rbm_metrics = {
+        'loss_history': training_loss_history,
+        'epochs': nb_epoch
+    }
+    st.session_state.rbm_train_time = time.time() - start_time
+    
     status_text.text('Training complete!')
     return training_loss_history
 
@@ -240,6 +257,43 @@ def plot_training_loss(loss_history, nb_epoch):
     ax.set_ylabel('Loss')
     ax.grid(True)
     st.pyplot(fig)
+
+def calculate_model_error(model, test_data, model_type="rbm"):
+    """Calculate Mean Absolute Error for a model on test data"""
+    # Convert to tensor
+    test_tensor = torch.FloatTensor(test_data)
+    
+    # Get predictions
+    if model_type.lower() == "rbm":
+        predictions = model(test_tensor).detach().numpy()
+    else:
+        model.eval()
+        with torch.no_grad():
+            predictions = model(test_tensor).numpy()
+    
+    # Only consider actual ratings (>=0)
+    error_sum = 0
+    count = 0
+    
+    for i in range(test_data.shape[0]):
+        # Get indices of actual ratings
+        actual_indices = np.where(test_data[i] >= 0)[0]
+        
+        # Skip if no ratings
+        if len(actual_indices) == 0:
+            continue
+        
+        # Calculate absolute error for this user
+        user_error = np.mean(np.abs(
+            predictions[i, actual_indices] - test_data[i, actual_indices]
+        ))
+        
+        error_sum += user_error
+        count += 1
+    
+    # Average error across all users
+    mae = error_sum / count if count > 0 else 0
+    return mae * 5  # Scale back to original rating scale (1-5)
 
 def main():
     st.title("🎬 Movie Recommendation System")
@@ -273,7 +327,7 @@ def main():
     learning_rate = 0.005
     
     # Tabs for different functions
-    tab1, tab2, tab3 = st.tabs(["Get Recommendations", "Train Model", "About"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Get Recommendations", "Train Model", "Model Comparison", "About"])
     
     with tab1:
         st.header("Get Movie Recommendations")
@@ -482,6 +536,169 @@ def main():
                         st.error(f"Error during Autoencoder model training: {e}")
     
     with tab3:
+        st.header("Model Comparison")
+        
+        # Check if models exist
+        rbm_exists = os.path.exists("rbm_model.pt")
+        autoencoder_exists = os.path.exists("autoencoder_model.pt")
+        
+        if not rbm_exists and not autoencoder_exists:
+            st.info("Please train at least one model in the 'Train Model' tab to see comparisons.")
+        else:
+            # Store training metrics in session state
+            if 'rbm_metrics' not in st.session_state:
+                st.session_state.rbm_metrics = {'loss_history': [], 'epochs': 0}
+            if 'autoencoder_metrics' not in st.session_state:
+                st.session_state.autoencoder_metrics = {'loss_history': [], 'epochs': 0}
+            
+            # Loss curves section
+            st.subheader("Training Loss Comparison")
+            
+            if len(st.session_state.rbm_metrics['loss_history']) == 0 and len(st.session_state.autoencoder_metrics['loss_history']) == 0:
+                st.write("No training metrics available yet. Train models to see comparison.")
+            else:
+                # Create loss curve plot
+                fig, ax = plt.subplots(figsize=(10, 6))
+                
+                # Plot RBM loss if available
+                if len(st.session_state.rbm_metrics['loss_history']) > 0:
+                    rbm_epochs = st.session_state.rbm_metrics['epochs']
+                    ax.plot(range(1, rbm_epochs + 1), st.session_state.rbm_metrics['loss_history'], 
+                            label='RBM', color='blue')
+                
+                # Plot Autoencoder loss if available
+                if len(st.session_state.autoencoder_metrics['loss_history']) > 0:
+                    ae_epochs = st.session_state.autoencoder_metrics['epochs']
+                    ax.plot(range(1, ae_epochs + 1), st.session_state.autoencoder_metrics['loss_history'], 
+                            label='Autoencoder', color='green')
+                
+                ax.set_title('Training Loss Comparison')
+                ax.set_xlabel('Epoch')
+                ax.set_ylabel('Loss')
+                ax.legend()
+                ax.grid(True)
+                st.pyplot(fig)
+            
+            # Performance metrics section
+            st.subheader("Performance Metrics")
+            
+            # Create columns for metrics
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**RBM Model**")
+                if rbm_exists:
+                    # Load RBM and evaluate
+                    rbm = get_model("rbm", nb_movies, nb_hidden, learning_rate)
+                    if 'rbm_mae' not in st.session_state:
+                        with st.spinner("Calculating RBM metrics..."):
+                            try:
+                                # Calculate MAE on test data
+                                mae = calculate_model_error(rbm, test_data, "rbm")
+                                st.session_state.rbm_mae = mae
+                            except Exception as e:
+                                st.error(f"Error calculating RBM metrics: {e}")
+                                st.session_state.rbm_mae = None
+                    
+                    if st.session_state.rbm_mae is not None:
+                        st.metric("Mean Absolute Error", f"{st.session_state.rbm_mae:.4f}")
+                    
+                    # Display parameters
+                    st.write(f"Hidden Units: {nb_hidden}")
+                    st.write(f"Learning Rate: {learning_rate}")
+                    if 'rbm_train_time' in st.session_state:
+                        st.write(f"Training Time: {st.session_state.rbm_train_time:.2f} seconds")
+                else:
+                    st.info("RBM model not trained yet")
+            
+            with col2:
+                st.write("**Autoencoder Model**")
+                if autoencoder_exists:
+                    # Load Autoencoder and evaluate
+                    autoencoder = get_model("autoencoder", nb_movies, nb_hidden, learning_rate)
+                    if 'autoencoder_mae' not in st.session_state:
+                        with st.spinner("Calculating Autoencoder metrics..."):
+                            try:
+                                # Calculate MAE on test data
+                                mae = calculate_model_error(autoencoder, test_data, "autoencoder")
+                                st.session_state.autoencoder_mae = mae
+                            except Exception as e:
+                                st.error(f"Error calculating Autoencoder metrics: {e}")
+                                st.session_state.autoencoder_mae = None
+                    
+                    if st.session_state.autoencoder_mae is not None:
+                        st.metric("Mean Absolute Error", f"{st.session_state.autoencoder_mae:.4f}")
+                    
+                    # Display parameters from the model if available
+                    if autoencoder is not None:
+                        hidden_dim = autoencoder.encoder[2].in_features
+                        st.write(f"Hidden Units: {hidden_dim}")
+                    if 'autoencoder_train_time' in st.session_state:
+                        st.write(f"Training Time: {st.session_state.autoencoder_train_time:.2f} seconds")
+                else:
+                    st.info("Autoencoder model not trained yet")
+            
+            # Sample user comparison
+            if rbm_exists and autoencoder_exists:
+                st.subheader("Recommendation Comparison")
+                
+                # Select a random user from the test set
+                if st.button("Generate comparison on random user"):
+                    with st.spinner("Generating comparison..."):
+                        try:
+                            # Select a random user
+                            test_user_idx = np.random.randint(0, test_data.shape[0])
+                            test_user = torch.FloatTensor(test_data[test_user_idx:test_user_idx+1])
+                            
+                            # Get actual non-negative ratings for evaluation
+                            actual_indices = np.where(test_data[test_user_idx] >= 0)[0]
+                            actual_ratings = test_data[test_user_idx, actual_indices]
+                            
+                            # Get RBM predictions
+                            rbm_preds = rbm(test_user).detach().numpy().flatten()
+                            
+                            # Get Autoencoder predictions
+                            autoencoder.eval()
+                            with torch.no_grad():
+                                ae_preds = autoencoder(test_user).numpy().flatten()
+                            
+                            # Calculate errors on visible ratings only
+                            rbm_error = np.mean(np.abs(rbm_preds[actual_indices] - actual_ratings))
+                            ae_error = np.mean(np.abs(ae_preds[actual_indices] - actual_ratings))
+                            
+                            # Create bar chart comparing the two errors
+                            fig, ax = plt.subplots(figsize=(8, 4))
+                            ax.bar(['RBM', 'Autoencoder'], [rbm_error, ae_error])
+                            ax.set_title('Model Error Comparison')
+                            ax.set_ylabel('Mean Absolute Error')
+                            st.pyplot(fig)
+                            
+                            # Show actual vs. predicted for a few movies
+                            st.write("**Sample Predictions for User**")
+                            
+                            # Get movie ids for sampled actual ratings
+                            movie_indices = actual_indices[:5]  # Just show 5 movies
+                            movie_ids = user_item_matrix.columns[movie_indices].tolist()
+                            movie_titles = [movies[movies['movie_id'] == mid]['title'].values[0] for mid in movie_ids]
+                            
+                            # Create dataframe for comparison
+                            comparison_df = pd.DataFrame({
+                                'Movie': movie_titles,
+                                'Actual': actual_ratings[:5] * 5,  # Scale back to 1-5
+                                'RBM Prediction': rbm_preds[movie_indices] * 5,
+                                'Autoencoder Prediction': ae_preds[movie_indices] * 5
+                            })
+                            
+                            st.dataframe(comparison_df.style.format({
+                                'Actual': '{:.1f}',
+                                'RBM Prediction': '{:.1f}',
+                                'Autoencoder Prediction': '{:.1f}'
+                            }))
+                            
+                        except Exception as e:
+                            st.error(f"Error generating comparison: {e}")
+    
+    with tab4:
         st.header("About This App")
         st.write("""
         This movie recommendation system compares two different neural network approaches:
